@@ -1,0 +1,109 @@
+name: Android APK Builder
+
+on:
+  workflow_dispatch:
+    inputs:
+      jobId:
+        description: 'Job ID'
+        required: true
+        type: string
+      zipUrl:
+        description: 'URL ZIP file'
+        required: true
+        type: string
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v3
+      
+      - name: Setup Java
+        uses: actions/setup-java@v3
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+      
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v2
+      
+      - name: Download ZIP
+        run: |
+          echo "Downloading from: ${{ github.event.inputs.zipUrl }}"
+          wget -O project.zip "${{ github.event.inputs.zipUrl }}"
+          unzip project.zip -d project/
+          ls -la project/
+      
+      - name: Detect Project Type
+        id: detect
+        run: |
+          cd project
+          if [ -f "pubspec.yaml" ]; then
+            echo "type=flutter" >> $GITHUB_OUTPUT
+            echo "Flutter project detected"
+          elif [ -f "build.gradle" ] || [ -d "app" ]; then
+            echo "type=android" >> $GITHUB_OUTPUT
+            echo "Android project detected"
+          elif [ -f "package.json" ]; then
+            if grep -q "react-native" package.json; then
+              echo "type=react-native" >> $GITHUB_OUTPUT
+              echo "React Native project detected"
+            else
+              echo "type=unknown" >> $GITHUB_OUTPUT
+            fi
+          else
+            echo "type=unknown" >> $GITHUB_OUTPUT
+          fi
+      
+      - name: Build Flutter APK
+        if: steps.detect.outputs.type == 'flutter'
+        run: |
+          cd project
+          git clone https://github.com/flutter/flutter.git -b stable
+          export PATH="$PATH:`pwd`/flutter/bin"
+          flutter doctor
+          flutter clean
+          flutter pub get
+          flutter build apk --release
+          mkdir -p ../output
+          cp build/app/outputs/flutter-apk/app-release.apk ../output/ || true
+          cp build/app/outputs/flutter-apk/app-debug.apk ../output/ || true
+      
+      - name: Build Android APK
+        if: steps.detect.outputs.type == 'android'
+        run: |
+          cd project
+          chmod +x gradlew || true
+          ./gradlew assembleRelease || ./gradlew assembleDebug
+          mkdir -p ../output
+          find . -name "*.apk" -exec cp {} ../output/ \;
+      
+      - name: Build React Native APK
+        if: steps.detect.outputs.type == 'react-native'
+        run: |
+          cd project
+          npm install
+          cd android
+          chmod +x gradlew
+          ./gradlew assembleRelease || ./gradlew assembleDebug
+          mkdir -p ../../output
+          find . -name "*.apk" -exec cp {} ../../output/ \;
+      
+      - name: Create ZIP with APK
+        run: |
+          cd output
+          if ls *.apk 1> /dev/null 2>&1; then
+            zip -r ../app-${{ github.event.inputs.jobId }}.zip *.apk
+          else
+            echo "No APK found" > error.txt
+            zip -r ../app-${{ github.event.inputs.jobId }}.zip error.txt
+          fi
+          cd ..
+      
+      - name: Upload Artifact
+        uses: actions/upload-artifact@v3
+        with:
+          name: app-${{ github.event.inputs.jobId }}
+          path: app-${{ github.event.inputs.jobId }}.zip
